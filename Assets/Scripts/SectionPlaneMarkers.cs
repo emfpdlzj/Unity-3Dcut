@@ -5,7 +5,7 @@ using System.Linq;
 public class SectionPlaneMarker : MonoBehaviour
 {
     // ── 좌표계 및 부모 설정 ─────────────────────────────
-    public enum CoordSpace { World, Local }          // 프리셋 좌표를 월드/로컬 기준으로 적용
+    public enum CoordSpace { World, Local }                  // 프리셋 좌표를 월드/로컬 기준으로 적용
     public enum ParentMode { ThisObject, WorldRoot, Custom } // 마커를 어디에 귀속할지
 
     // ── 프리셋 구조체: 절단면 위치/회전/스케일 정보 ─────────────────
@@ -13,37 +13,54 @@ public class SectionPlaneMarker : MonoBehaviour
     public struct CutPreset
     {
         public string  label;     // 인스펙터에서 구분용 이름
-        public Vector3 position;  // 기준 좌표 (World/Local)
+        public Vector3 position;  // 기준 좌표 (World/Local 또는 followTarget 로컬)
         public Vector3 rotation;  // Euler 각도
-        public Vector3 scale;     // Quad 스케일
+        public Vector3 scale;     // Quad 스케일(보이는 크기 또는 타깃 로컬 단위)
     }
 
     [Header("Material")]
-    public Material redUnlitMaterial; // 절단면에 적용할 머티리얼 (빨간색 추천)
+    public Material redUnlitMaterial; // 절단면에 적용할 머티리얼 (Unlit 권장)
 
     [Header("Presets")]
     public CutPreset[] presets = new CutPreset[4]; // 최대 4개의 절단면 설정
 
     [Header("Placement / Space")]
-    public CoordSpace coordSpace = CoordSpace.World;    // 좌표계 기준
+    public CoordSpace coordSpace = CoordSpace.World;     // 좌표계 기준
     public ParentMode parentMode = ParentMode.WorldRoot; // 부모 모드 (월드 루트 권장)
-    public Transform customParent;                      // ParentMode.Custom일 경우 지정
-    public bool startHidden = true;                     // 시작 시 절단면 숨김 여부
-    public int[] startActiveIndices;                    // 시작 시 표시할 인덱스들
+    public Transform customParent;                       // ParentMode.Custom일 경우 부모 지정
+    public bool startHidden = true;                      // 시작 시 절단면 숨김 여부
+    public int[] startActiveIndices;                     // 시작 시 표시할 인덱스들
 
     [Header("Stability")]
-    public bool lockEveryFrame = true;  // true → Preset 값으로 매 프레임 덮어씀 (좌표 고정)
-                                        // false → 마커 직접 이동 가능, 값은 Preset에 기록됨
+    public bool lockEveryFrame = true;    // true → Preset 값으로 매 프레임 덮어씀 (좌표 고정)
+                                          // false → 마커 직접 이동 시 그 값을 Preset에 기록
     public bool ignoreParentScale = true; // 부모 오브젝트 스케일 영향 배제 여부
 
     [SerializeField, HideInInspector] Transform[] markers; // 프리셋별 실제 Quad 참조
 
+    // ── microElbow 추적 관련 ─────────────────────────────
+    public enum RotationFollowMode
+    {
+        CopyTarget,        // 타깃 회전 그대로 복사
+        TargetPlusPreset,  // 타깃 회전 * 프리셋 오프셋 (기본)
+        AlignTargetAxis    // 타깃 로컬축을 절단면 법선으로 정렬
+    }
+
+    public enum TargetAxis { Forward, Up, Right }
+
+    [Header("Follow Target (no parenting)")]
+    public Transform followTarget;            // microElbow 등, 따라갈 대상
+    public bool relativeToTarget = true;      // true면 프리셋 좌표를 followTarget 로컬 기준으로 해석
+    public bool scaleWithTarget = true;       // true면 타깃 스케일 변화에 절단면 크기도 비례
+    public RotationFollowMode rotationMode = RotationFollowMode.TargetPlusPreset;
+    public TargetAxis alignAxis = TargetAxis.Forward; // AlignTargetAxis 모드에서 사용할 축
+
     // ─────────────────────────────────────────────────────────
     void Awake()
     {
-        EnsureMarkersSized();      // 프리셋 개수와 markers 배열 동기화
-        EnsureMarkersExist();      // Quad 오브젝트 생성
-        ApplyAllPresetsToMarkers();// Preset → Marker 적용
+        EnsureMarkersSized();       // 프리셋 개수와 markers 배열 동기화
+        EnsureMarkersExist();       // Quad 오브젝트 생성
+        ApplyAllPresetsToMarkers(); // Preset → Marker 적용
         if (startHidden) HideAll();
         else ShowOnly(startActiveIndices);
     }
@@ -62,10 +79,11 @@ public class SectionPlaneMarker : MonoBehaviour
 
     void Update()
     {
-        // ── Preset 고정 모드 ─────────────────────────────
+        if (markers == null) return;
+
+        // 프리셋 고정/기록 모드
         if (lockEveryFrame)
         {
-            // Preset 값으로 마커 위치/회전/스케일을 매 프레임 덮어씀
             for (int i = 0; i < markers.Length; i++)
             {
                 var m = markers[i];
@@ -75,7 +93,6 @@ public class SectionPlaneMarker : MonoBehaviour
         }
         else
         {
-            // 마커를 직접 조정할 경우, 그 값을 Preset에 저장
             for (int i = 0; i < markers.Length; i++)
             {
                 var m = markers[i];
@@ -84,7 +101,7 @@ public class SectionPlaneMarker : MonoBehaviour
             }
         }
 
-        // ── 숫자키 단축키로 토글 ─────────────────────────
+        // 숫자키 단축키
         if (Input.GetKeyDown(KeyCode.Alpha1)) Toggle(0);
         if (Input.GetKeyDown(KeyCode.Alpha2)) Toggle(1);
         if (Input.GetKeyDown(KeyCode.Alpha3)) Toggle(2);
@@ -139,18 +156,37 @@ public class SectionPlaneMarker : MonoBehaviour
                 if (mr && redUnlitMaterial) mr.sharedMaterial = redUnlitMaterial;
 
                 var t = go.transform;
-                t.SetParent(GetTargetParent(), true);
+                t.SetParent(parent, true);
                 markers[i] = t;
                 markers[i].gameObject.SetActive(false); // 기본은 숨김
             }
             else
             {
                 // 부모 변경 시 다시 귀속
-                var wantParent = GetTargetParent();
+                var wantParent = parent;
                 if (markers[i].parent != wantParent)
                     markers[i].SetParent(wantParent, true);
             }
         }
+    }
+
+    // 부모 스케일을 고려해 "보이는 월드 스케일"을 로컬스케일로 환산
+    Vector3 WorldToLocalScale(Vector3 desiredWorldScale, Transform parent)
+    {
+        if (ignoreParentScale && parent != null)
+        {
+            Vector3 ps = parent.lossyScale;
+            // 0 가드
+            ps.x = ps.x == 0 ? 1 : ps.x;
+            ps.y = ps.y == 0 ? 1 : ps.y;
+            ps.z = ps.z == 0 ? 1 : ps.z;
+            return new Vector3(
+                desiredWorldScale.x / Mathf.Abs(ps.x),
+                desiredWorldScale.y / Mathf.Abs(ps.y),
+                desiredWorldScale.z / Mathf.Abs(ps.z)
+            );
+        }
+        return desiredWorldScale; // 부모 스케일 영향 무시 안 하면 로컬=월드로 가정
     }
 
     // ── Preset → Marker (Push) ─────────────────────────
@@ -166,29 +202,63 @@ public class SectionPlaneMarker : MonoBehaviour
         var m = markers[index];
         var p = presets[index];
 
+        // ── ① followTarget 기준 상대 적용(우선 적용) ─────────────────
+        if (relativeToTarget && followTarget != null)
+        {
+            // 위치: 타깃 로컬 → 월드
+            Vector3 worldPos = followTarget.TransformPoint(p.position);
+
+            // 회전: 모드별
+            Quaternion worldRot;
+            switch (rotationMode)
+            {
+                case RotationFollowMode.CopyTarget:
+                    worldRot = followTarget.rotation;
+                    break;
+
+                case RotationFollowMode.AlignTargetAxis:
+                    Vector3 normal;
+                    switch (alignAxis)
+                    {
+                        case TargetAxis.Up:    normal = followTarget.up; break;
+                        case TargetAxis.Right: normal = followTarget.right; break;
+                        default:               normal = followTarget.forward; break;
+                    }
+                    // 법선을 타깃 축에 맞추고, 프리셋 회전을 추가 오프셋으로 적용
+                    worldRot = Quaternion.LookRotation(normal, Vector3.up) * Quaternion.Euler(p.rotation);
+                    break;
+
+                default: // TargetPlusPreset
+                    worldRot = followTarget.rotation * Quaternion.Euler(p.rotation);
+                    break;
+            }
+
+            // 스케일: 타깃 스케일에 비례(선택)
+            Vector3 desiredWorldScale = p.scale;
+            if (scaleWithTarget)
+            {
+                Vector3 ts = followTarget.lossyScale;
+                desiredWorldScale = new Vector3(
+                    p.scale.x * Mathf.Abs(ts.x),
+                    p.scale.y * Mathf.Abs(ts.y),
+                    p.scale.z * Mathf.Abs(ts.z)
+                );
+            }
+
+            m.position   = worldPos;
+            m.rotation   = worldRot;
+            m.localScale = WorldToLocalScale(desiredWorldScale, m.parent);
+            return;
+        }
+
+        // ── ② 기존 동작(월드/로컬) 유지 ───────────────────────────────
         if (coordSpace == CoordSpace.World)
         {
-            // 월드 좌표 기준으로 적용
             m.position = p.position;
             m.rotation = Quaternion.Euler(p.rotation);
-
-            if (ignoreParentScale && m.parent != null)
-            {
-                // 부모 스케일 무시 → 월드 스케일 유지
-                Vector3 parentLossy = m.parent.lossyScale;
-                Vector3 safe = new Vector3(
-                    parentLossy.x == 0 ? 1 : parentLossy.x,
-                    parentLossy.y == 0 ? 1 : parentLossy.y,
-                    parentLossy.z == 0 ? 1 : parentLossy.z
-                );
-                m.localScale = new Vector3(p.scale.x / safe.x, p.scale.y / safe.y, p.scale.z / safe.z);
-            }
-            else
-            {
-                m.localScale = p.scale;
-            }
+            m.localScale = WorldToLocalScale(p.scale, m.parent);
         }
-        else // 로컬 좌표 기준
+        else // Local
         {
             m.localPosition = p.position;
             m.localRotation = Quaternion.Euler(p.rotation);
@@ -208,33 +278,64 @@ public class SectionPlaneMarker : MonoBehaviour
         if (!IsValid(index)) return;
         var m = markers[index];
 
+        // ── ① followTarget 기준으로 프리셋에 저장(우선 적용) ──────────
+        if (relativeToTarget && followTarget != null)
+        {
+            // 월드 → 타깃 로컬
+            presets[index].position = followTarget.InverseTransformPoint(m.position);
+            Quaternion localRot = Quaternion.Inverse(followTarget.rotation) * m.rotation;
+            presets[index].rotation = localRot.eulerAngles;
+
+            // 현재 보이는 크기(월드 스케일)
+            Vector3 worldScale = m.lossyScale;
+
+            // 프리셋에는 "타깃 로컬 단위"로 저장해야 나중에 타깃 스케일이 변해도 같은 비율 유지
+            if (scaleWithTarget)
+            {
+                Vector3 ts = followTarget.lossyScale;
+                ts.x = ts.x == 0 ? 1 : ts.x;
+                ts.y = ts.y == 0 ? 1 : ts.y;
+                ts.z = ts.z == 0 ? 1 : ts.z;
+
+                presets[index].scale = new Vector3(
+                    worldScale.x / Mathf.Abs(ts.x),
+                    worldScale.y / Mathf.Abs(ts.y),
+                    worldScale.z / Mathf.Abs(ts.z)
+                );
+            }
+            else
+            {
+                // 타깃 스케일 비례 X → 그냥 보이는 월드 크기를 저장
+                presets[index].scale = worldScale;
+            }
+            return;
+        }
+
+        // ── ② 기존 동작(월드/로컬) 유지 ───────────────────────────────
         if (coordSpace == CoordSpace.World)
         {
             presets[index].position = m.position;
             presets[index].rotation = m.rotation.eulerAngles;
 
+            // 보이는 월드 크기로 저장 (부모 스케일 보정)
             if (ignoreParentScale && m.parent != null)
             {
-                // 부모 스케일이 있으면 월드 스케일로 변환
-                Vector3 parentLossy = m.parent.lossyScale;
-                Vector3 safe = new Vector3(
-                    parentLossy.x == 0 ? 1 : parentLossy.x,
-                    parentLossy.y == 0 ? 1 : parentLossy.y,
-                    parentLossy.z == 0 ? 1 : parentLossy.z
+                Vector3 ps = m.parent.lossyScale;
+                ps.x = ps.x == 0 ? 1 : ps.x;
+                ps.y = ps.y == 0 ? 1 : ps.y;
+                ps.z = ps.z == 0 ? 1 : ps.z;
+                presets[index].scale = new Vector3(
+                    m.localScale.x * Mathf.Abs(ps.x),
+                    m.localScale.y * Mathf.Abs(ps.y),
+                    m.localScale.z * Mathf.Abs(ps.z)
                 );
-                Vector3 worldScale = new Vector3(
-                    m.localScale.x * safe.x,
-                    m.localScale.y * safe.y,
-                    m.localScale.z * safe.z
-                );
-                presets[index].scale = worldScale;
             }
             else
             {
                 presets[index].scale = m.localScale;
             }
         }
-        else // 로컬 기준
+        else // Local
         {
             presets[index].position = m.localPosition;
             presets[index].rotation = m.localRotation.eulerAngles;
@@ -288,4 +389,17 @@ public class SectionPlaneMarker : MonoBehaviour
         markers != null && presets != null &&
         index >= 0 && index < markers.Length && index < presets.Length &&
         markers[index] != null;
+
+    // ── 디버그: 마커 축 기즈모 ─────────────────────────
+    void OnDrawGizmosSelected()
+    {
+        if (markers == null) return;
+        foreach (var m in markers)
+        {
+            if (!m) continue;
+            Gizmos.color = Color.red;   Gizmos.DrawLine(m.position, m.position + m.right * 0.2f);
+            Gizmos.color = Color.green; Gizmos.DrawLine(m.position, m.position + m.up * 0.2f);
+            Gizmos.color = Color.blue;  Gizmos.DrawLine(m.position, m.position + m.forward * 0.2f);
+        }
+    }
 }
